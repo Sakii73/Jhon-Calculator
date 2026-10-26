@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HK Gold Price</title>
+<style>
+  /* Plain, mobile-first styling. Works in Safari on an iPhone. No outside libraries. */
+  :root{
+    --bg:#0f1830; --card:#182440; --line:#2a3a63; --ink:#eaf0ff; --soft:#9fb0d6;
+    --gold:#f2b53b; --green:#39c07a; --red:#ff6b6b; --navy:#3a6df0;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+    line-height:1.45; padding:16px;
+  }
+  .wrap{max-width:560px; margin:0 auto}
+  h1{font-size:18px; margin:4px 0 2px; font-weight:600}
+  .sub{color:var(--soft); font-size:13px; margin-bottom:16px}
+  .card{background:var(--card); border:1px solid var(--line); border-radius:14px;
+        padding:16px; margin-bottom:14px}
+  .price{font-size:44px; font-weight:700; color:var(--gold); letter-spacing:.5px}
+  .price small{font-size:16px; color:var(--soft); font-weight:500}
+  .asof{color:var(--soft); font-size:14px; margin-top:4px}
+  pre.block{background:#0c1327; border:1px solid var(--line); border-radius:10px;
+        padding:12px; font-size:15px; margin:14px 0 0; white-space:pre-wrap;
+        font-family:Consolas,Menlo,monospace; color:var(--ink)}
+  .row{display:flex; gap:10px; margin-top:14px}
+  button{font:inherit; font-weight:600; border:0; border-radius:10px; padding:12px 16px;
+        cursor:pointer; flex:1}
+  .go{background:var(--navy); color:#fff}
+  .go:active{opacity:.8}
+  .ghost{background:transparent; color:var(--soft); border:1px solid var(--line); flex:0 0 auto}
+  .count{color:var(--soft); font-size:13px; margin-top:10px; text-align:center}
+  details{margin-top:12px; border-top:1px solid var(--line); padding-top:10px}
+  summary{cursor:pointer; color:var(--soft); font-size:14px}
+  .steps{font-family:Consolas,Menlo,monospace; font-size:13px; margin:10px 0 0; padding:0; list-style:none}
+  .steps li{padding:2px 0}
+  .sources{color:var(--soft); font-size:13px; white-space:pre-wrap; margin-top:10px}
+  .banner{border-radius:10px; padding:12px; font-size:14px; margin-bottom:14px; display:none}
+  .banner.err{background:#3a1420; border:1px solid #5e2130; color:#ffc2c2; display:block}
+  .banner.load{background:#13284a; border:1px solid #244a86; color:#bcd3ff; display:block}
+  table{width:100%; border-collapse:collapse; font-size:13px; margin-top:10px}
+  th,td{text-align:left; padding:6px 4px; border-bottom:1px solid var(--line)}
+  th{color:var(--soft); font-weight:600}
+  td.hk{color:var(--gold); font-weight:700}
+  .hist-head{display:flex; justify-content:space-between; align-items:center}
+  .mini{font-size:12px; padding:8px 12px; flex:0 0 auto}
+  .empty{color:var(--soft); font-size:13px; margin-top:10px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>HK Gold Price</h1>
+  <div class="sub">USD&rarr;PHP from XE &middot; gold Bid from Kitco &middot; recalculates every 15 minutes while this page is open</div>
+
+  <div id="banner" class="banner"></div>
+
+  <div class="card">
+    <div id="price" class="price">&mdash;<small> /gram</small></div>
+    <div id="asof" class="asof">Not calculated yet.</div>
+    <pre id="block" class="block">Press "Calculate now" to read the current price.</pre>
+
+    <div class="row">
+      <button id="go" class="go">Calculate now</button>
+    </div>
+    <div id="count" class="count"></div>
+
+    <details>
+      <summary>Show the computation</summary>
+      <ul id="steps" class="steps"></ul>
+      <div id="sources" class="sources"></div>
+    </details>
+  </div>
+
+  <div class="card">
+    <div class="hist-head">
+      <strong>History <span id="histcount" class="sub" style="margin:0"></span></strong>
+      <div style="display:flex; gap:8px">
+        <button id="csv" class="ghost mini">Export CSV</button>
+        <button id="clear" class="ghost mini">Clear</button>
+      </div>
+    </div>
+    <div id="histbody"></div>
+  </div>
+</div>
+
+<script>
+"use strict";
+// ---- settings -------------------------------------------------------------
+var AUTO_MS = 15 * 60 * 1000;     // recalculate every 15 minutes while open
+var KEY = "hk_history_v1";        // where history is kept IN THIS BROWSER
+var CSV_HEAD = ["date","time","Us raw","Us","Gold","Hk","XE time","Kitco time"];
+
+var autoTimer = null, nextAt = 0, lastOkBlock = null;
+
+// ---- history (lives only in this browser, per device) ---------------------
+function loadHistory(){
+  try { return JSON.parse(localStorage.getItem(KEY)) || []; }
+  catch(e){ return []; }
+}
+function saveHistory(list){
+  try { localStorage.setItem(KEY, JSON.stringify(list.slice(-2000))); }
+  catch(e){ /* private mode etc.: history just won't persist */ }
+}
+function addRecord(rec){
+  var list = loadHistory();
+  list.push(rec);
+  saveHistory(list);
+  renderHistory();
+}
+
+// ---- drawing --------------------------------------------------------------
+function setBanner(kind, text){
+  var b = document.getElementById("banner");
+  b.className = "banner" + (kind ? " " + kind : "");
+  b.textContent = text || "";
+}
+function peso(n){ return "₱" + Number(n).toLocaleString("en-US"); }
+
+function render(p){
+  document.getElementById("price").innerHTML = peso(p.hk) + "<small> /gram</small>";
+  document.getElementById("block").textContent = p.block;
+  document.getElementById("asof").textContent = p.sentence;
+  var steps = document.getElementById("steps");
+  steps.innerHTML = "";
+  p.steps.forEach(function(line){
+    var li = document.createElement("li"); li.textContent = line; steps.appendChild(li);
+  });
+  document.getElementById("sources").textContent = p.sources;
+  lastOkBlock = p.block;
+}
+
+function renderHistory(){
+  var list = loadHistory();
+  var body = document.getElementById("histbody");
+  document.getElementById("histcount").textContent = list.length ? "(" + list.length + ")" : "";
+  if (!list.length){ body.innerHTML = '<div class="empty">No calculations saved yet on this device.</div>'; return; }
+  var rows = list.slice().reverse().slice(0, 50);   // newest first, show the latest 50
+  var html = '<table><tr><th>Date</th><th>Time</th><th>Us</th><th>Gold</th><th>Hk</th></tr>';
+  rows.forEach(function(r){
+    html += "<tr><td>" + r.date + "</td><td>" + r.time + "</td><td>" + r.us +
+            "</td><td>" + r.gold + "</td><td class='hk'>" + Number(r.hk).toLocaleString("en-US") + "</td></tr>";
+  });
+  html += "</table>";
+  if (list.length > 50) html += '<div class="empty">Showing the latest 50. Export CSV for all ' + list.length + '.</div>';
+  body.innerHTML = html;
+}
+
+// ---- countdown ------------------------------------------------------------
+function schedule(){
+  if (autoTimer) clearInterval(autoTimer);
+  autoTimer = setInterval(calcNow, AUTO_MS);   // keep the 15-min rhythm
+  nextAt = Date.now() + AUTO_MS;
+}
+setInterval(function(){
+  if (!nextAt) return;
+  var left = Math.max(0, Math.round((nextAt - Date.now()) / 1000));
+  var m = Math.floor(left / 60), s = left % 60;
+  document.getElementById("count").textContent =
+    "Next automatic update in " + m + ":" + (s < 10 ? "0" : "") + s;
+}, 1000);
+
+// ---- the one network call -------------------------------------------------
+function calcNow(){
+  schedule();                                  // pressing the button restarts the 15-min clock
+  setBanner("load", "Reading XE and Kitco…");
+  document.getElementById("go").disabled = true;
+  fetch("/api/price", { cache: "no-store" })
+    .then(function(r){ return r.json(); })
+    .then(function(p){
+      if (p.ok){
+        setBanner("", "");
+        render(p);
+        addRecord(p.record);
+      } else {
+        // Same rule as the desktop program: show the problem, do NOT compute with
+        // missing or old values. The last good reading stays on screen.
+        setBanner("err", p.error);
+      }
+    })
+    .catch(function(e){
+      setBanner("err", "Could not reach the server. Check your internet and try again. (" + e + ")");
+    })
+    .finally(function(){
+      document.getElementById("go").disabled = false;
+    });
+}
+
+// ---- export / clear -------------------------------------------------------
+function exportCSV(){
+  var list = loadHistory();
+  if (!list.length){ setBanner("err", "No history to export yet."); return; }
+  var lines = [CSV_HEAD.join(",")];
+  list.forEach(function(r){
+    lines.push([r.date, r.time, r.us_raw, r.us, r.gold, r.hk, r.xe_time, r.kitco_time].join(","));
+  });
+  var blob = new Blob([lines.join("\r\n") + "\r\n"], { type: "text/csv" });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement("a");
+  a.href = url; a.download = "records.csv";
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(function(){ URL.revokeObjectURL(url); }, 1000);
+}
+
+document.getElementById("go").addEventListener("click", calcNow);
+document.getElementById("csv").addEventListener("click", exportCSV);
+document.getElementById("clear").addEventListener("click", function(){
+  if (confirm("Clear the saved history on this device?")){ saveHistory([]); renderHistory(); }
+});
+
+// ---- start ----------------------------------------------------------------
+renderHistory();
+calcNow();
+</script>
+</body>
+</html>
