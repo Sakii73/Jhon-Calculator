@@ -6,15 +6,20 @@ and recalculates every 15 minutes while the page is open (plus a "Calculate now"
 
 It works in any browser, including Safari on an iPhone - no install, no sideloading.
 
-## How it is built
+## The files (flat layout - no subfolders)
 
-- `index.html` - the page itself (what the client sees). Plain HTML/JavaScript, no libraries.
-- `api/price.py` - a tiny server function that reads XE + Kitco and returns the finished
-  numbers as JSON. A browser cannot read those sites directly (they block cross-site
-  requests), so this does it on the server.
-- `api/core.py` - the exact same logic file as the Windows program (formula, parsing,
-  rounding, the client's text format). One source of truth.
-- `requirements.txt` - lists `tzdata` so time zones work on the server.
+```
+app.py             the whole program for Vercel (serves the page + reads XE/Kitco)
+core.py            the SAME logic file as the Windows program (formula, parsing, format)
+index.html         the page the client sees (plain HTML/JavaScript, no libraries)
+requirements.txt   lists Flask (the web framework) and tzdata
+```
+
+`app.py` uses Flask because Vercel's Python runtime loads one app object. It defines just
+two addresses: `/` serves the page, and `/api/price` reads XE + Kitco and returns the
+finished numbers as JSON. A browser can't read those sites directly (they block cross-site
+requests), so the server does it. All the real logic stays in `core.py`, so there is one
+source of truth shared with the Windows program.
 
 History is saved **in the browser** (per device), not on the server. The client's phone
 builds up its own history as they use it. "Export CSV" downloads it with the same columns
@@ -22,25 +27,20 @@ as the desktop `records.csv`.
 
 ## Deploy it for free (Vercel, from GitHub)
 
-Vercel's free "Hobby" plan runs both the page and the small Python function, and it
-deploys straight from a GitHub repo.
+Vercel's free "Hobby" plan runs the Flask app, and it deploys straight from a GitHub repo.
 
-1. **Put these files in a GitHub repo.** Create a new repo (e.g. `hk-gold-web`), and add:
+1. **Put these four files in a GitHub repo**, all at the top level (no `api/` folder):
    ```
+   app.py
+   core.py
    index.html
    requirements.txt
-   api/price.py
-   api/core.py
    ```
-   Keep the `api/` folder exactly as-is.
 2. **Sign up at vercel.com** with your GitHub account (free).
-3. Click **Add New -> Project**, pick your `hk-gold-web` repo, and press **Deploy**.
-   No settings to change - Vercel sees `index.html` and serves it, and sees `api/price.py`
-   and runs it at `/api/price`.
+3. Click **Add New -> Project**, pick your repo, and press **Deploy**. Vercel sees Flask in
+   `requirements.txt`, loads `app`, and runs it. No settings to change.
 4. You get a URL like `https://hk-gold-web.yourname.vercel.app`. Open it on the iPhone.
-   Every time you push to GitHub, Vercel redeploys automatically.
-
-That is still "deploying with GitHub" - the repo lives on GitHub, Vercel just runs it.
+   Every push to GitHub redeploys automatically.
 
 ## The one thing to test first
 
@@ -49,10 +49,9 @@ Kitco may block or throttle requests coming from a data-center IP (Vercel's serv
 though they work from a home PC. So right after deploying:
 
 - Open the URL and press **Calculate now**.
-- If you see a price, it works.
-- If you see an error like "Could not reach XE" or "not in the expected layout", the host's
-  IP is likely being blocked or served different HTML. Tell me and we will look at options
-  (different host, or adjusting how it fetches).
+- A price appears -> it works.
+- A red error like "Could not reach XE" or "not in the expected layout" -> the host's IP is
+  likely blocked or served different HTML. Tell me and we will look at options.
 
 ## Pure-GitHub alternative (no Vercel)
 
