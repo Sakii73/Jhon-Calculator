@@ -86,11 +86,7 @@
 <div class="wrap">
   <div class="head">
     <h1>HK Gold Price <span>&#9679;</span></h1>
-    <div class="sub">USD&rarr;PHP from XE &middot; gold Bid from Kitco &middot; re-reads on a timer you set (default: every minute)</div>
-  </div>
-
-  <div class="bwrap card" style="border-bottom:0; padding-bottom:0">
-    <div id="banner" class="banner"></div>
+    <div class="sub">Gold Bid from Kitco on a timer you set (Kitco changes every 10 seconds) &middot; USD&rarr;PHP from XE, read at most once a minute</div>
   </div>
 
   <div class="card">
@@ -103,6 +99,8 @@
     <div class="row">
       <button id="go" class="go">Calculate now</button>
     </div>
+    <!-- errors only; hidden (takes no space) until something goes wrong -->
+    <div id="banner" class="banner" style="margin-top:12px"></div>
     <div id="count" class="count"></div>
 
     <div class="setrow">
@@ -133,6 +131,7 @@
         <button id="clear" class="ghost mini">Clear</button>
       </div>
     </div>
+    <div class="empty" style="margin-top:6px">A row is saved every 15 minutes, and each time you press Calculate now.</div>
     <div id="histbody"></div>
   </div>
 </div>
@@ -140,12 +139,14 @@
 <script>
 "use strict";
 // ---- settings -------------------------------------------------------------
-// How often the page re-reads the price. The user can change this with the controls
-// under the button. Default 60s. Note: XE and Kitco only refresh about once a minute,
-// so a shorter interval just re-reads the same number (and risks being blocked).
+// How often the page re-reads the gold price. The user can change this with the controls
+// under the button. Default 10 s, because Kitco's gold price changes every 10 seconds;
+// faster just repeats the same price. (XE is read by the server at most once a minute.)
 var UNITS = { seconds:1, minutes:60, hours:3600 };
-var INT_MIN = 1, INT_MAX = 24 * 3600, FAST = 30, INT_KEY = "hk_interval_v1";
-var AUTO_MS = 60 * 1000;   // real value set at startup from the saved setting
+var INT_MIN = 1, INT_MAX = 24 * 3600, FAST = 10, INT_KEY = "hk_interval_v1";
+var AUTO_MS = 10 * 1000;   // real value set at startup from the saved setting
+var SAVE_EVERY_MS = 15 * 60 * 1000;   // history gets one row per 15 minutes (+ Calculate now)
+var LAST_SAVE_KEY = "hk_last_save_v1";
 var KEY = "hk_history_v1";        // where history is kept IN THIS BROWSER
 var CSV_HEAD = ["date","time","Us raw","Us","Gold","Hk","XE time","Kitco time"];
 var XLS_HEAD = ["Date","Time","Us raw","Us","Gold","Hk","XE time","Kitco time"];
@@ -204,7 +205,10 @@ function renderHistory(){
 // ---- countdown ------------------------------------------------------------
 function schedule(){
   if (autoTimer) clearInterval(autoTimer);
-  autoTimer = setInterval(calcNow, AUTO_MS);   // keep the chosen rhythm
+  autoTimer = setInterval(function(){
+    nextAt = Date.now() + AUTO_MS;     // countdown starts over at every automatic read
+    calcNow("auto");
+  }, AUTO_MS);
   nextAt = Date.now() + AUTO_MS;
 }
 
@@ -212,13 +216,13 @@ function schedule(){
 function loadInterval(){
   try{ var s = JSON.parse(localStorage.getItem(INT_KEY));
        if (s && UNITS[s.unit] && s.amount > 0) return s; }catch(e){}
-  return { amount:60, unit:"seconds" };
+  return { amount:10, unit:"seconds" };
 }
 function saveInterval(s){ try{ localStorage.setItem(INT_KEY, JSON.stringify(s)); }catch(e){} }
 function intervalSeconds(s){ return Math.min(INT_MAX, Math.max(INT_MIN, Math.round(s.amount * UNITS[s.unit]))); }
 function refreshHint(secs){
   document.getElementById("int-hint").textContent = secs < FAST
-    ? "XE and Kitco only update about once a minute, so under ~30s re-reads the same price (and risks being blocked)."
+    ? "Kitco's gold price changes every 10 seconds, so reading faster mostly repeats the same price (and uses up the free hosting faster)."
     : "";
 }
 function applyInterval(){
@@ -241,14 +245,32 @@ setInterval(function(){
 }, 1000);
 
 // ---- the one network call -------------------------------------------------
-function calcNow(){
-  schedule();                                  // pressing the button restarts the 15-min clock
-  setBanner("load", "Reading XE and Kitco…");
-  document.getElementById("go").disabled = true;
+var busy = false;            // true while a read is on its way: reads never overlap
+
+function lastSaveMs(){ try { return Number(localStorage.getItem(LAST_SAVE_KEY)) || 0; } catch(e){ return 0; } }
+function markSaved(){ try { localStorage.setItem(LAST_SAVE_KEY, String(Date.now())); } catch(e){} }
+
+// trigger is "auto" (the timer) or "manual" (the Calculate now button)
+function calcNow(trigger){
+  if (busy) return;            // the previous read hasn't come back yet: skip this tick
+  busy = true;
+  var manual = trigger === "manual";
+  if (manual) schedule();      // pressing the button restarts the countdown
+  var go = document.getElementById("go");
+  go.disabled = true;
+  // Only a press shows "Reading..." (on the button, so nothing moves). Automatic reads
+  // every few seconds stay quiet - the price simply changes when Kitco's does.
+  if (manual) go.textContent = "Reading…";
   fetch("/api/price", { cache: "no-store" })
     .then(function(r){ return r.json(); })
     .then(function(p){
-      if (p.ok){ setBanner("", ""); render(p); addRecord(p.record); }
+      if (p.ok){
+        setBanner("", "");
+        render(p);
+        // History: one row per 15 minutes, plus every press of Calculate now -
+        // otherwise a 10-second timer would add 360 rows an hour.
+        if (manual || Date.now() - lastSaveMs() >= SAVE_EVERY_MS){ addRecord(p.record); markSaved(); }
+      }
       // Same rule as the desktop: show the problem, do NOT compute with missing/old
       // values. The last good reading stays on screen.
       else { setBanner("err", p.error); }
@@ -256,7 +278,7 @@ function calcNow(){
     .catch(function(e){
       setBanner("err", "Could not reach the server. Check your internet and try again. (" + e + ")");
     })
-    .finally(function(){ document.getElementById("go").disabled = false; });
+    .finally(function(){ busy = false; go.disabled = false; go.textContent = "Calculate now"; });
 }
 
 // ---- export: Excel (.xlsx, formatted) and CSV -----------------------------
@@ -306,7 +328,7 @@ function exportCSV(){
   setTimeout(function(){ URL.revokeObjectURL(url); }, 1000);
 }
 
-document.getElementById("go").addEventListener("click", calcNow);
+document.getElementById("go").addEventListener("click", function(){ calcNow("manual"); });
 document.getElementById("xlsx").addEventListener("click", exportXLSX);
 document.getElementById("csv").addEventListener("click", exportCSV);
 document.getElementById("int-apply").addEventListener("click", applyInterval);
@@ -324,7 +346,8 @@ document.getElementById("clear").addEventListener("click", function(){
   refreshHint(secs);
 })();
 renderHistory();
-calcNow();
+schedule();          // start the automatic timer
+calcNow("auto");     // and read once right away
 </script>
 </body>
 </html>

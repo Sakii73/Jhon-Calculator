@@ -73,6 +73,16 @@ def fetch_text(url):
         raise FetchError(f"Could not reach {url} ({error})") from error
 
 
+def unique_address(url):
+    """The same address plus '?nocache=<milliseconds>', different on every read.
+    XE and Kitco both sit behind caches that hand out an OLD copy of a plain address
+    (XE: for hours; Kitco's gold feed: about a minute, although Kitco itself updates
+    every 10 seconds). A brand-new address is never in any cache, so we get today's
+    real numbers. (Found with test_xe_live.py, and for Kitco by watching its charts page.)"""
+    joiner = "&" if "?" in url else "?"
+    return f"{url}{joiner}nocache={int(time.time() * 1000)}"
+
+
 def page_texts(raw):
     """Two plain-text versions of a web page: tags removed with and without a space.
     (A site can split one number across several tags, so we try both.)"""
@@ -136,10 +146,8 @@ def parse_xe(raw):
 def get_us_rate():
     """Read XE. Returns (raw rate as Decimal, time of the rate as a UTC datetime)."""
     # XE's CDN (CloudFront) keeps its page cached for hours, so the plain address can give
-    # a copy that is more than an hour old. A new, unique address every time is never in
-    # that cache, so XE builds the page fresh. (Confirmed with test_xe_live.py.)
-    fresh_address = f"{XE_URL}&nocache={int(time.time() * 1000)}"
-    rate, xe_time = parse_xe(fetch_text(fresh_address))
+    # a copy that is more than an hour old. See unique_address().
+    rate, xe_time = parse_xe(fetch_text(unique_address(XE_URL)))
     check_fresh("XE", xe_time)
     return rate, xe_time
 
@@ -170,7 +178,9 @@ def parse_kitco_json(raw):
 
 
 def read_kitco_json():
-    return parse_kitco_json(fetch_text(KITCO_JSON_URL))
+    # Kitco's feed changes every 10 seconds, but the plain address is cached for about a
+    # minute - that is why fast reads used to repeat the same gold price. See unique_address().
+    return parse_kitco_json(fetch_text(unique_address(KITCO_JSON_URL)))
 
 
 def parse_kitco_html(raw):
@@ -197,7 +207,7 @@ def parse_kitco_html(raw):
 
 
 def read_kitco_html():
-    return parse_kitco_html(fetch_text(KITCO_HTML_URL))
+    return parse_kitco_html(fetch_text(unique_address(KITCO_HTML_URL)))
 
 
 def get_gold_bid():
