@@ -4,7 +4,7 @@ core.py - the logic of the HK Gold Price Calculator. No GUI in this file.
 What the GUI will call:
     get_us_rate()         -> (raw USD->PHP rate, time of that rate)
     get_gold_bid()        -> (gold Bid, time of that price, which source it came from)
-    round_us(raw_rate)    -> the dollar rate rounded UP to 2 decimals
+    round_us(raw_rate)    -> the dollar rate cut to 2 decimals (extra decimals dropped)
     compute_hk(us, gold)  -> dict with every step of the client's formula
 
 Plus text helpers at the bottom (client_block, client_sentence, step_lines, ...)
@@ -20,7 +20,7 @@ import time
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from decimal import (Decimal, InvalidOperation,
-                     ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP)
+                     ROUND_CEILING, ROUND_DOWN, ROUND_FLOOR, ROUND_HALF_UP)
 from zoneinfo import ZoneInfo
 
 # ------------------------------------------------------------------ settings ---
@@ -33,9 +33,12 @@ USER_AGENT = (
 )
 TIMEOUT_SECONDS = 25
 
-# The ONE place that decides how Us is rounded. The client's rule is "always up".
-# If the XE-app check says normal rounding is right, change this to ROUND_HALF_UP.
-US_ROUNDING = ROUND_CEILING
+# The ONE place that decides how Us is rounded to 2 decimals.
+# Client's rule (decided 2026-10-30): CUT OFF the extra decimals, never round up:
+#     63.70390875 -> 63.70,  63.709 -> 63.70,  63.951 -> 63.95
+# Other choices, if the client ever changes his mind:
+#     ROUND_CEILING = always up (63.7039 -> 63.71)   ROUND_HALF_UP = normal (63.706 -> 63.71)
+US_ROUNDING = ROUND_DOWN
 
 MAX_AGE_MINUTES = 20  # a source time older than this is treated as a failure
 
@@ -153,7 +156,7 @@ def get_us_rate():
 
 
 def round_us(raw_rate):
-    """Round the XE rate to 2 decimals, always UP: 63.951 -> 63.96, 63.95000000 -> 63.95."""
+    """The XE rate with 2 decimals, using US_ROUNDING (now: cut off): 63.70390875 -> 63.70."""
     return Decimal(raw_rate).quantize(TWO_DECIMALS, rounding=US_ROUNDING)
 
 
@@ -310,7 +313,7 @@ def step_lines(result):
 def source_text(raw_rate, us, xe_time, gold, kitco_time, source):
     """Where the two numbers came from, with source times in Philippine time.
     The JSON feed has seconds; XE and the Kitco web page only have minutes."""
-    rounded = "rounded up" if US_ROUNDING == ROUND_CEILING else "rounded"
+    rounded = {ROUND_CEILING: "rounded up", ROUND_DOWN: "cut"}.get(US_ROUNDING, "rounded")
     return (f"XE USD to PHP: {format(raw_rate, 'f')}, {rounded} to {plain_2(us)}\n"
             f"   rate time: {ph_clock(xe_time)} (Philippine time)\n"
             f"Kitco gold Bid: {plain_2(gold)} USD per troy ounce ({source})\n"

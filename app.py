@@ -92,6 +92,13 @@ def build_payload():
         "steps": core.step_lines(result),                   # the computation, one line each
         "sources": core.source_text(raw_rate, us, xe_time, gold, kitco_time, source),
         "hk": result["hk"],
+        "live": {                                           # the always-visible Gold / XE tiles
+            "gold": f"{gold:,.2f}",
+            "gold_time": core.ph_clock(kitco_time, seconds=(source == core.SOURCE_JSON)),
+            "xe_raw": format(raw_rate, "f"),
+            "us": core.plain_2(us),
+            "xe_time": core.ph_clock(xe_time),
+        },
         "record": {                                         # one history row (desktop CSV columns)
             "date": now_ph.strftime("%Y-%m-%d"),
             "time": now_ph.strftime("%H:%M:%S"),

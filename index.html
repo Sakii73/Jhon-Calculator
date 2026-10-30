@@ -39,6 +39,14 @@
   .price small{font-size:16px; color:var(--grey); font-weight:500}
   .asof{color:var(--grey); font-size:14px; margin-top:6px}
 
+  /* the two live source values, like the desktop's XE and Kitco cards */
+  .tiles{display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:14px}
+  .tile{border:1px solid var(--border); border-radius:10px; padding:10px 12px; background:#fff}
+  .tile .lbl{font-size:12px; font-weight:600; color:var(--navy); letter-spacing:.2px}
+  .tile .val{font-size:21px; font-weight:700; color:var(--navy); margin-top:2px;
+        font-family:Consolas,Menlo,monospace; word-break:break-all}
+  .tile .sub2{font-size:12px; color:var(--grey); margin-top:2px; line-height:1.35}
+
   pre.block{background:#f5f7fb; border:1px solid var(--border); border-radius:10px;
         padding:12px; font-size:15px; margin:14px 0 0; white-space:pre-wrap;
         font-family:Consolas,Menlo,monospace; color:var(--ink)}
@@ -94,6 +102,18 @@
       <div id="price" class="price">&mdash;<small> /gram</small></div>
       <div id="asof" class="asof">Not calculated yet.</div>
     </div>
+    <div class="tiles">
+      <div class="tile">
+        <div class="lbl">GOLD &middot; Kitco Bid</div>
+        <div id="t-gold" class="val">&mdash;</div>
+        <div id="t-gold-sub" class="sub2">USD per troy ounce</div>
+      </div>
+      <div class="tile">
+        <div class="lbl">XE &middot; USD to PHP</div>
+        <div id="t-xe" class="val">&mdash;</div>
+        <div id="t-xe-sub" class="sub2">PHP for 1 USD</div>
+      </div>
+    </div>
     <pre id="block" class="block">Press "Calculate now" to read the current price.</pre>
 
     <div class="row">
@@ -131,7 +151,7 @@
         <button id="clear" class="ghost mini">Clear</button>
       </div>
     </div>
-    <div class="empty" style="margin-top:6px">A row is saved every 15 minutes, and each time you press Calculate now.</div>
+    <div class="empty" style="margin-top:6px">Every calculation is saved here, on this device (the newest 8,640). Export to Excel to keep them.</div>
     <div id="histbody"></div>
   </div>
 </div>
@@ -145,8 +165,6 @@
 var UNITS = { seconds:1, minutes:60, hours:3600 };
 var INT_MIN = 1, INT_MAX = 24 * 3600, FAST = 10, INT_KEY = "hk_interval_v1";
 var AUTO_MS = 10 * 1000;   // real value set at startup from the saved setting
-var SAVE_EVERY_MS = 15 * 60 * 1000;   // history gets one row per 15 minutes (+ Calculate now)
-var LAST_SAVE_KEY = "hk_last_save_v1";
 var KEY = "hk_history_v1";        // where history is kept IN THIS BROWSER
 var CSV_HEAD = ["date","time","Us raw","Us","Gold","Hk","XE time","Kitco time"];
 var XLS_HEAD = ["Date","Time","Us raw","Us","Gold","Hk","XE time","Kitco time"];
@@ -158,9 +176,15 @@ function loadHistory(){
   try { return JSON.parse(localStorage.getItem(KEY)) || []; }
   catch(e){ return []; }
 }
+// Every calculation is saved, so this keeps the newest MAX_ROWS (one day at 10 seconds).
+// If the phone's storage for this page is full, keep the newer half and try again.
+var MAX_ROWS = 8640;
 function saveHistory(list){
-  try { localStorage.setItem(KEY, JSON.stringify(list.slice(-2000))); }
-  catch(e){ /* private mode etc.: history just won't persist */ }
+  list = list.slice(-MAX_ROWS);
+  for (var tries = 0; tries < 4; tries++){
+    try { localStorage.setItem(KEY, JSON.stringify(list)); return; }
+    catch(e){ list = list.slice(Math.floor(list.length / 2)); }
+  }
 }
 function addRecord(rec){
   var list = loadHistory(); list.push(rec); saveHistory(list); renderHistory();
@@ -184,6 +208,11 @@ function render(p){
     var li = document.createElement("li"); li.textContent = line; steps.appendChild(li);
   });
   document.getElementById("sources").textContent = p.sources;
+  var L = p.live;
+  document.getElementById("t-gold").textContent = L.gold;
+  document.getElementById("t-gold-sub").textContent = "USD per troy ounce \u00b7 " + L.gold_time;
+  document.getElementById("t-xe").textContent = L.xe_raw;
+  document.getElementById("t-xe-sub").textContent = "Us " + L.us + " (cut) \u00b7 " + L.xe_time;
 }
 
 function renderHistory(){
@@ -247,8 +276,6 @@ setInterval(function(){
 // ---- the one network call -------------------------------------------------
 var busy = false;            // true while a read is on its way: reads never overlap
 
-function lastSaveMs(){ try { return Number(localStorage.getItem(LAST_SAVE_KEY)) || 0; } catch(e){ return 0; } }
-function markSaved(){ try { localStorage.setItem(LAST_SAVE_KEY, String(Date.now())); } catch(e){} }
 
 // trigger is "auto" (the timer) or "manual" (the Calculate now button)
 function calcNow(trigger){
@@ -267,9 +294,7 @@ function calcNow(trigger){
       if (p.ok){
         setBanner("", "");
         render(p);
-        // History: one row per 15 minutes, plus every press of Calculate now -
-        // otherwise a 10-second timer would add 360 rows an hour.
-        if (manual || Date.now() - lastSaveMs() >= SAVE_EVERY_MS){ addRecord(p.record); markSaved(); }
+        addRecord(p.record);       // every calculation, automatic or pressed, gets a row
       }
       // Same rule as the desktop: show the problem, do NOT compute with missing/old
       // values. The last good reading stays on screen.
