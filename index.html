@@ -43,9 +43,21 @@
   .tiles{display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:14px}
   .tile{border:1px solid var(--border); border-radius:10px; padding:10px 12px; background:#fff}
   .tile .lbl{font-size:12px; font-weight:600; color:var(--navy); letter-spacing:.2px}
-  .tile .val{font-size:21px; font-weight:700; color:var(--navy); margin-top:2px;
-        font-family:Consolas,Menlo,monospace; word-break:break-all}
+  .tile .val{font-size:clamp(15px, 4.6vw, 21px); font-weight:700; color:var(--navy); margin-top:2px;
+        font-family:Consolas,Menlo,monospace; white-space:nowrap}
   .tile .sub2{font-size:12px; color:var(--grey); margin-top:2px; line-height:1.35}
+  .tile .vrow{display:flex; align-items:baseline; gap:6px}
+  /* The flash, copied from kitco.com: the number sits in a small rounded "pill"; on a
+     change a pale green (up) or pale red (down) layer appears behind it and fades out
+     over 1.2 s (90% -> 60% -> 0%). The number itself never moves. */
+  .pill{position:relative; display:inline-flex; border-radius:6px; padding:1px 4px; margin-left:-4px; overflow:hidden}
+  .pill > span{position:relative; z-index:1}
+  .pill::after{content:""; position:absolute; inset:0; opacity:0; pointer-events:none; z-index:0}
+  .pill.up::after{background:rgb(188,255,210)}
+  .pill.down::after{background:rgb(255,220,220)}
+  .pill.flash::after{animation:tickerBlink 1.2s cubic-bezier(.22,1,.36,1) 1}
+  @keyframes tickerBlink{0%{opacity:.9} 40%{opacity:.6} 100%{opacity:0}}
+  @media (prefers-reduced-motion: reduce){ .pill.flash::after{animation:none} }
 
   pre.block{background:#f5f7fb; border:1px solid var(--border); border-radius:10px;
         padding:12px; font-size:15px; margin:14px 0 0; white-space:pre-wrap;
@@ -94,7 +106,7 @@
 <div class="wrap">
   <div class="head">
     <h1>HK Gold Price <span>&#9679;</span></h1>
-    <div class="sub">Calculates by itself on a timer you set &middot; gold Bid from Kitco (changes every 10 seconds) &middot; USD&rarr;PHP from XE, read at most once a minute</div>
+    <div class="sub">Gold refreshes every second (Kitco changes every 10 seconds) &middot; XE once a minute &middot; calculates by itself on a timer you set</div>
   </div>
 
   <div class="card">
@@ -103,14 +115,14 @@
       <div id="asof" class="asof">Not calculated yet.</div>
     </div>
     <div class="tiles">
-      <div class="tile">
+      <div class="tile" id="tile-gold">
         <div class="lbl">GOLD &middot; Kitco Bid</div>
-        <div id="t-gold" class="val">&mdash;</div>
+        <div class="vrow"><div id="p-gold" class="val pill"><span id="t-gold">&mdash;</span></div></div>
         <div id="t-gold-sub" class="sub2">USD per troy ounce</div>
       </div>
-      <div class="tile">
+      <div class="tile" id="tile-xe">
         <div class="lbl">XE &middot; USD to PHP</div>
-        <div id="t-xe" class="val">&mdash;</div>
+        <div class="vrow"><div id="p-xe" class="val pill"><span id="t-xe">&mdash;</span></div></div>
         <div id="t-xe-sub" class="sub2">PHP for 1 USD</div>
       </div>
     </div>
@@ -208,11 +220,99 @@ function render(p){
     var li = document.createElement("li"); li.textContent = line; steps.appendChild(li);
   });
   document.getElementById("sources").textContent = p.sources;
-  var L = p.live;
-  document.getElementById("t-gold").textContent = L.gold;
-  document.getElementById("t-gold-sub").textContent = "USD per troy ounce \u00b7 " + L.gold_time;
+  setXE(p.live);                                    // same XE rate the server just used
+  if (tile.gold.err || tile.gold.value === null)    // this phone can't reach Kitco: use the server's
+    setGold(p.live.gold_plain, p.live.gold_ms, p.live.gold_time);
+}
+
+// ---- live tiles: gold every second (straight from Kitco), XE once a minute ------
+// Gold is read by THIS browser directly from Kitco (Kitco allows that), so it costs no
+// server calls. XE blocks browsers, so the server reads it - at most once a minute.
+// Both tiles redraw every second, so their "... s ago" keeps counting.
+var KITCO_URL = "https://api.kitco.com/api/v1/precious-metals";
+var GOLD_MS = 1000, XE_MS = 60 * 1000;
+var tile = { gold: { value: null, ms: null, time: "", err: "", busy: false },
+             xe:   { value: null, ms: null, time: "", us: "", err: "" } };
+
+function nyToMs(s){
+  // "2026-10-30 01:36:36" is New York clock time -> milliseconds since 1970 (UTC).
+  // New York's offset changes with daylight saving, so ask the browser what it is.
+  var p = s.split(/[- :]/).map(Number);
+  var guess = Date.UTC(p[0], p[1] - 1, p[2], p[3], p[4], p[5]);
+  var f = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hourCycle: "h23",
+    year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  var g = {}; f.formatToParts(new Date(guess)).forEach(function(x){ g[x.type] = x.value; });
+  var shown = Date.UTC(+g.year, +g.month - 1, +g.day, +g.hour % 24, +g.minute, +g.second);
+  return guess + (guess - shown);
+}
+function phClock(ms, withSeconds){
+  var o = { timeZone: "Asia/Manila", hour: "numeric", minute: "2-digit" };
+  if (withSeconds) o.second = "2-digit";
+  return new Date(ms).toLocaleTimeString("en-US", o).replace("AM", "A.M.").replace("PM", "P.M.");
+}
+function ago(ms){
+  var s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+  return s < 60 ? s + " s ago" : Math.floor(s / 60) + " min " + (s % 60) + " s ago";
+}
+function money(v){ return Number(v).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+
+// Kitco-style flash when a value really changed: pale green (up) / pale red (down)
+// behind the number, fading out over 1.2 s.
+function animate(which, oldV, newV){
+  if (oldV === null || oldV === newV) return;        // first value, or the same: nothing to show
+  var up = Number(newV) > Number(oldV);
+  var pill = document.getElementById("p-" + which);
+  pill.classList.remove("flash", "up", "down");
+  void pill.offsetWidth;                             // lets the same animation play again
+  pill.classList.add(up ? "up" : "down", "flash");
+}
+function setGold(value, ms, timeText){
+  var t = tile.gold, old = t.value;
+  t.value = value; t.ms = ms; t.time = timeText; t.err = "";
+  document.getElementById("t-gold").textContent = money(value);
+  animate("gold", old, value);
+  drawTileTimes();
+}
+function setXE(L){
+  var t = tile.xe, old = t.value;
+  t.value = L.xe_raw; t.ms = L.xe_ms; t.time = L.xe_time; t.us = L.us; t.err = "";
   document.getElementById("t-xe").textContent = L.xe_raw;
-  document.getElementById("t-xe-sub").textContent = "Us " + L.us + " (cut) \u00b7 " + L.xe_time;
+  animate("xe", old, L.xe_raw);
+  drawTileTimes();
+}
+function drawTileTimes(){
+  var g = tile.gold, x = tile.xe;
+  if (g.ms !== null) document.getElementById("t-gold-sub").textContent =
+    (g.err ? g.err + " \u00b7 last " : "USD per troy ounce \u00b7 ") + g.time + " \u00b7 " + ago(g.ms);
+  else if (g.err) document.getElementById("t-gold-sub").textContent = g.err;
+  if (x.ms !== null) document.getElementById("t-xe-sub").textContent =
+    (x.err ? x.err + " \u00b7 last " : "Us " + x.us + " (cut) \u00b7 ") + x.time + " \u00b7 " + ago(x.ms);
+  else if (x.err) document.getElementById("t-xe-sub").textContent = x.err;
+}
+function readGold(){
+  var t = tile.gold;
+  if (t.busy) return;                                // last read not back yet: skip this second
+  t.busy = true;
+  fetch(KITCO_URL + "?nocache=" + Date.now(), { cache: "no-store" })
+    .then(function(r){ return r.json(); })
+    .then(function(j){
+      var list = j.PreciousMetals.PM, au = null;
+      for (var i = 0; i < list.length; i++) if (list[i].Symbol === "AU") au = list[i];
+      if (!au) throw new Error("no gold in Kitco's data");
+      var ms = nyToMs(au.timestamp);
+      setGold(Number(au.current_bid).toFixed(2), ms, phClock(ms, true));
+    })
+    .catch(function(){ t.err = "Can't reach Kitco right now"; drawTileTimes(); })
+    .finally(function(){ t.busy = false; });
+}
+function readXE(){
+  fetch("/api/xe", { cache: "no-store" })
+    .then(function(r){ return r.json(); })
+    .then(function(L){
+      if (L.ok) setXE(L);
+      else { tile.xe.err = "XE not available right now"; drawTileTimes(); }
+    })
+    .catch(function(){ tile.xe.err = "Can't reach the server"; drawTileTimes(); });
 }
 
 function renderHistory(){
@@ -272,6 +372,7 @@ setInterval(function(){
   document.getElementById("count").textContent =
     "Next automatic calculation in " + m + ":" + (s < 10 ? "0" : "") + s;
 }, 1000);
+setInterval(drawTileTimes, 1000);   // keeps the tiles' "... s ago" counting
 
 // ---- the one network call -------------------------------------------------
 var busy = false;            // true while a read is on its way: reads never overlap
@@ -373,6 +474,8 @@ document.getElementById("clear").addEventListener("click", function(){
 renderHistory();
 schedule();          // start the automatic timer
 calcNow("auto");     // and read once right away
+readGold(); setInterval(readGold, GOLD_MS);     // gold tile: every second
+readXE();   setInterval(readXE, XE_MS);         // XE tile: once a minute
 </script>
 </body>
 </html>

@@ -3,23 +3,27 @@ gui.py - the window of the HK Gold Price Calculator.   Run:  py gui.py
 (The packaged .exe starts from start.py instead, which adds a safety net around this file.)
 
 How it works (read this first):
+  * Two cards show the live sources, read quietly in the background: the Kitco gold Bid
+    every second, the XE rate once a minute. When a value changes, its card flashes like
+    kitco.com does (pale green up, pale red down, fading out in 1.2 s).
   * The program calculates automatically every N seconds/minutes/hours (ONE setting, chosen
-    in the window). An automatic calculation is exactly the same as pressing "Calculate now":
-    read the Kitco gold Bid, read XE (at most once a minute - in between, the last XE rate is
-    reused), compute Hk, show it. Automatic ones just happen quietly.
-  * ONE clock ticks every second (tick). Each tick asks "is the next calculation due?"
-    -> start_calculation(), then refreshes the countdown and the age of the readings.
+    in the window), from the newest values on the two cards - so a calculation needs no
+    internet and is instant. "Calculate now" does exactly the same, straight away.
+  * ONE clock ticks every second (tick). Each tick asks "is something due?" - a gold read,
+    an XE read, the next calculation - then refreshes the countdown and the readings' ages.
   * Anything slow (downloading, writing the Excel file) runs in a BACKGROUND thread so the
-    window never freezes. A background thread never touches the widgets. When it finishes it
-    calls root.after(0, ...), which makes the window's own thread run calc_done / export_done.
-  * records.csv gets one row every 15 minutes, plus one for every press of Calculate now
-    (a row every few seconds would bury the client in data). log.txt notes every saved row
-    and every failure - see records.py. "Export to Excel" turns records.csv into a .xlsx.
+    window never freezes. A background thread never touches the widgets: it drops its result
+    in a mailbox (self.inbox), and check_inbox - run by root.after on the window's own thread
+    every 50 ms - takes it out and runs read_done / export_done.
+  * EVERY successful calculation (automatic or Calculate now) is added to records.csv and
+    noted in log.txt; a failure is noted in log.txt once (not again every tick while the
+    same problem lasts) - see records.py. "Export to Excel" turns records.csv into a .xlsx.
   * The look: the build_* functions make the boxes ("cards"), setup_styles() holds all the
     colours. Change a colour there and the whole window follows.
 """
 import json
 import math
+import queue
 import sys
 import threading
 import time
@@ -35,9 +39,6 @@ import icon_data
 import records
 
 # ------------------------------------------------------------------ settings ---
-SAVE_EVERY_SECONDS = 15 * 60         # records.csv gets one row every 15 minutes
-                                     # (plus one for every press of Calculate now)
-
 UNITS = {"seconds": 1, "minutes": 60, "hours": 3600}        # unit name -> seconds
 INTERVAL_MIN, INTERVAL_MAX = 1, 24 * 3600                   # allowed range, in seconds
 DEFAULT_INTERVAL = (10, "seconds")                          # how often it calculates by itself
@@ -45,6 +46,12 @@ FAST_SECONDS = 10                    # Kitco's gold price changes every 10 s; fa
 XE_MIN_SECONDS = 60                  # XE is read at most once a minute, however fast gold is read:
                                      # its rate is only time-stamped to the minute, and reading
                                      # it every few seconds gets the PC's internet address blocked
+GOLD_SECONDS = 1                     # the Gold card reads Kitco every second
+GOLD_PAGE_MIN_SECONDS = 60           # Kitco's big web page (backup for its JSON feed): once a minute max
+# The flash when a card's value changes, copied from kitco.com's own style sheet:
+FLASH_UP, FLASH_DOWN = (188, 255, 210), (255, 220, 220)      # pale green / pale red
+FLASH_STEPS_MS = (0, 60, 120, 200, 300, 420, 560, 720, 900, 1080, 1200)   # repaint moments
+INBOX_MS = 50                        # how often the window checks for finished background work
 ACTIVITY_LINES = 8                   # how many log lines the "Activity log" tab shows
 ACTIVITY_CHARS = 84                  # longer lines are cut (the full text is in log.txt)
 
@@ -161,6 +168,24 @@ def is_fresh(name, reading):
         return False
 
 
+def flash_strength(ms):
+    """How strong a card's flash is `ms` milliseconds after the change (0 = gone).
+    kitco.com's curve: 90% -> 60% in the first 0.48 s, then -> 0% at 1.2 s, each part
+    slowing down as it goes ("ease-out"). Tkinter has no CSS animations, so we repaint it."""
+    ease = lambda x: 1 - (1 - x) ** 5
+    if ms >= 1200:
+        return 0.0
+    if ms < 480:
+        return 0.9 - 0.3 * ease(ms / 480)
+    return 0.6 - 0.6 * ease((ms - 480) / 720)
+
+
+def blend(base_hex, rgb, strength):
+    """The colour `strength` (0..1) of the way from base_hex (e.g. "#ffffff") to rgb."""
+    base = [int(base_hex[i:i + 2], 16) for i in (1, 3, 5)]
+    return "#%02x%02x%02x" % tuple(round(b + (c - b) * strength) for b, c in zip(base, rgb))
+
+
 class Feed:
     """Everything the window needs to know about one data source (XE or Kitco)."""
 
@@ -171,6 +196,9 @@ class Feed:
         self.latest = None          # newest good reading: (value, time, source name)
         self.error = ""             # the source's own message if the newest read failed, else ""
         self.tried_at = None        # time.monotonic() of the last read attempt (None = never)
+        self.running = False        # True while a background read is on its way
+        self.next_at = 0.0          # gold only: when the next read is due
+        self.flash_jobs = []        # the scheduled steps of a running flash (so a new one can cancel it)
         # the widgets of its card are stored here by App.build_feed_card:
         self.value_label = self.info_label = self.error_label = None
 
@@ -181,13 +209,13 @@ class App:
         self.root = root
         self.amount, self.unit = load_settings()        # ONE interval for both feeds
         self.xe = Feed("xe", "XE  ·  USD to PHP", read_xe)
-        self.kitco = Feed("kitco", "Kitco  ·  gold Bid", core.get_gold_bid)
+        self.kitco = Feed("kitco", "Kitco  ·  gold Bid", self.read_gold)
         self.feeds = [self.xe, self.kitco]
+        self.gold_page_tried = float("-inf")    # when Kitco's big web page was last tried
+        self.pending_manual = False             # Calculate now is waiting for an XE read
         self.last_data = None      # everything about the last successful calculation
-        self.calc_running = False
-        self.calc_trigger = "auto"              # who started the running calculation: auto / manual
+        self.calc_trigger = "auto"              # who started the last calculation: auto / manual
         self.next_calc_at = time.monotonic()    # due immediately at startup
-        self.next_save_at = time.monotonic()    # the first good calculation is saved
         self.last_failure = ""     # the last error message, so the same one isn't logged every tick
 
         self.saved_count = 0       # rows in records.csv
@@ -204,6 +232,8 @@ class App:
         self.refresh_records_panel()
         self.set_status("Starting... reading XE and Kitco.", ORANGE)
         self.write_log(records.log_text(datetime.now(core.MANILA), "START", "Program opened"))
+        self.inbox = queue.Queue()      # finished background work waits here for the window
+        self.check_inbox()
         self.tick()
         self.fix_window_size()
 
@@ -377,7 +407,7 @@ class App:
                                       command=self.copy_result)
         self.copy_button.grid(row=7, column=0, sticky="w")
         self.calc_button = ttk.Button(box, text="Calculate now", style="Primary.TButton",
-                                      command=lambda: self.start_calculation("manual"))
+                                      command=self.calculate_now)
         self.calc_button.grid(row=8, column=0, sticky="ew", pady=(14, 6))
         self.countdown_label = ttk.Label(box, style="Card.TLabel", foreground=GREY)
         self.countdown_label.grid(row=9, column=0, sticky="w")
@@ -411,8 +441,8 @@ class App:
         box.columnconfigure(0, weight=1)
         self.card_title(box, feed.title).grid(row=0, column=0, sticky="w")
         feed.value_label = ttk.Label(box, style="Card.TLabel", foreground=NAVY,
-                                     font=(UI_FONT, 22, "bold"))
-        feed.value_label.grid(row=1, column=0, sticky="w", pady=(4, 2))
+                                     font=(UI_FONT, 22, "bold"), padding=(4, 1))
+        feed.value_label.grid(row=1, column=0, sticky="w", padx=(0, 0), pady=(4, 2))
         feed.info_label = ttk.Label(box, style="Card.TLabel", wraplength=250, justify="left",
                                     foreground=GREY, font=(UI_FONT, 9))
         feed.info_label.grid(row=2, column=0, sticky="w")
@@ -440,10 +470,10 @@ class App:
                    command=self.apply_interval).grid(row=1, column=3, pady=(8, 0))
         self.interval_message = ttk.Label(box, style="Card.TLabel", wraplength=540,
                                           justify="left", foreground=GREY, font=(UI_FONT, 9),
-                                          text="Allowed: 1 second to 24 hours. Kitco's gold "
-                                               "changes every 10 seconds; XE is read at most "
-                                               "once a minute. records.csv gets a row every "
-                                               "15 minutes and on Calculate now.")
+                                          text="Allowed: 1 second to 24 hours. The cards "
+                                               "update by themselves: gold every second, XE "
+                                               "once a minute. Every calculation is saved to "
+                                               "records.csv.")
         self.interval_message.grid(row=2, column=0, columnspan=6, sticky="w", pady=(6, 0))
         return outer
 
@@ -478,8 +508,13 @@ class App:
     # ------------------------------------------------------------ the clock ---
     def tick(self):
         self.root.after(1000, self.tick)      # schedule the NEXT tick first: one bad tick can't stop the clock
-        if time.monotonic() >= self.next_calc_at and not self.calc_running:
-            self.start_calculation("auto")
+        now = time.monotonic()
+        if not self.kitco.running and now >= self.kitco.next_at:
+            self.start_read(self.kitco)                   # Gold card: every second
+        if not self.xe.running and self.xe_due():
+            self.start_read(self.xe)                      # XE card: once a minute
+        if now >= self.next_calc_at and self.first_reads_done():
+            self.run_calculation("auto")
         self.refresh_labels()
 
     def refresh_labels(self):
@@ -576,102 +611,150 @@ class App:
         self.write_log(records.log_text(datetime.now(core.MANILA), "STOP", "Program closed"))
         self.root.destroy()
 
-    # ------------------------------------------------------- the calculation ---
+    # --------------------------------------- the two cards: background reads ---
     def send_to_window(self, function, *args):
-        """Hand a result from a background thread to the window's own thread."""
+        """Hand a result from a background thread to the window's own thread.
+        The thread only puts it in the mailbox (a queue.Queue is safe to use from any
+        thread); it never calls Tk itself, which some Tk builds don't allow."""
+        self.inbox.put((function, args))
+
+    def check_inbox(self):
+        """Window's thread, every INBOX_MS: run whatever the background threads finished."""
+        self.root.after(INBOX_MS, self.check_inbox)    # schedule the next check first
+        while True:
+            try:
+                function, args = self.inbox.get_nowait()
+            except queue.Empty:
+                return
+            function(*args)
+
+    def xe_due(self):
+        """Time to read XE again? Once a minute (XE_MIN_SECONDS), or never read yet."""
+        return (self.xe.tried_at is None
+                or time.monotonic() - self.xe.tried_at >= XE_MIN_SECONDS)
+
+    def xe_usable(self):
+        """Is there an XE rate young enough to calculate with?"""
+        return self.xe.latest is not None and is_fresh("XE", self.xe.latest)
+
+    def first_reads_done(self):
+        """Both sources answered at least once (with a value or an error)."""
+        return all(feed.latest is not None or feed.error for feed in self.feeds)
+
+    def start_read(self, feed):
+        feed.running = True
+        feed.tried_at = time.monotonic()
+        if feed is self.kitco:
+            feed.next_at = feed.tried_at + GOLD_SECONDS   # every second (never two at once)
+        threading.Thread(target=self.read_worker, args=(feed,), daemon=True).start()
+
+    def read_worker(self, feed):
+        # BACKGROUND thread: only call core here, never touch widgets.
+        self.send_to_window(self.read_done, feed, try_read(feed.read))
+
+    def read_gold(self):
+        """BACKGROUND thread. Kitco's small JSON feed every second. Its big web page (the
+        backup) only if it wasn't tried in the last minute - every second would be heavy."""
+        use_page = time.monotonic() - self.gold_page_tried >= GOLD_PAGE_MIN_SECONDS
         try:
-            self.root.after(0, function, *args)
-        except (RuntimeError, tk.TclError):
-            pass    # the window was closed while the thread was still working
+            reading = core.get_gold_bid(try_web_page=use_page)
+        except core.FetchError:
+            if use_page:
+                self.gold_page_tried = time.monotonic()   # the page was tried too, and failed
+            raise
+        if reading[2] == core.SOURCE_HTML:
+            self.gold_page_tried = time.monotonic()
+        return reading
 
-    def xe_due(self, manual=False):
-        """Read XE this time? If it was last tried a minute or more ago (or never). In
-        between, the last XE rate is reused - see XE_MIN_SECONDS. Exception: a press of
-        Calculate now when there is no usable XE rate tries XE again straight away (the
-        limit is there to stop the timer hammering XE, not to ignore a person)."""
-        if self.xe.tried_at is None or time.monotonic() - self.xe.tried_at >= XE_MIN_SECONDS:
-            return True
-        return manual and (self.xe.latest is None or not is_fresh("XE", self.xe.latest))
+    def read_done(self, feed, outcome):              # runs on the window's thread
+        feed.running = False
+        kind, value = outcome
+        if kind == "ok":
+            old = feed.latest[0] if feed.latest else None
+            feed.latest, feed.error = value, ""
+            if old is not None and value[0] != old:
+                self.flash(feed, up=value[0] > old)
+        else:
+            feed.error = value                       # the card keeps its last good value
+        if feed is self.xe and self.pending_manual:  # Calculate now was waiting for this
+            self.pending_manual = False
+            self.run_calculation("manual")
+        self.refresh_labels()
 
-    def start_calculation(self, trigger="auto"):
-        """trigger is 'auto' (the timer) or 'manual' (the Calculate now button). Both do
-        exactly the same work; only a manual one shows that it is busy."""
-        if self.calc_running:
-            return                       # one at a time, however short the interval is
-        self.calc_running = True
-        self.calc_trigger = trigger
-        if trigger == "manual":
+    def flash(self, feed, up):
+        """kitco.com's flash on a card: a pale green (up) or pale red (down) highlight
+        behind the number that fades out over 1.2 s. Painted in small steps."""
+        for job in feed.flash_jobs:                  # a new change restarts the flash
+            self.root.after_cancel(job)
+        colour = FLASH_UP if up else FLASH_DOWN
+        feed.flash_jobs = [self.root.after(ms, self.paint_flash, feed, colour, ms)
+                           for ms in FLASH_STEPS_MS]
+
+    def paint_flash(self, feed, colour, ms):
+        feed.value_label.config(background=blend(CARD, colour, flash_strength(ms)))
+
+    # ------------------------------------------------------- the calculation ---
+    def calculate_now(self):
+        """The Calculate now button. Calculates at once from the cards. If there is no
+        usable XE rate, it reads XE first (even within the minute) and then calculates."""
+        if not self.xe_usable():
+            self.pending_manual = True
             self.calc_button.state(["disabled"])
             self.set_status("Calculating...", ORANGE)
-        read_xe_now = self.xe_due(manual=(trigger == "manual"))
-        now = time.monotonic()
-        self.kitco.tried_at = now
-        if read_xe_now:
-            self.xe.tried_at = now
-        threading.Thread(target=self.calc_worker,
-                         args=(read_xe_now, self.xe.latest, self.xe.error),
-                         daemon=True).start()
+            if not self.xe.running:
+                self.start_read(self.xe)
+            return
+        self.run_calculation("manual")
 
-    def calc_worker(self, read_xe_now, xe_latest, xe_last_error):
-        # BACKGROUND thread: only call core here, never touch widgets.
-        reads = {"xe": try_read(self.xe.read) if read_xe_now else None,   # None = not due
-                 "kitco": try_read(self.kitco.read)}                      # gold: every time
+    def run_calculation(self, trigger):
+        """trigger is 'auto' (the timer) or 'manual' (the button) - the same work.
+        Uses the newest XE and gold on the cards, so no internet and no waiting."""
+        self.calc_trigger = trigger
+        self.next_calc_at = time.monotonic() + self.interval_seconds()   # restart the countdown
         try:
-            kind, gold = reads["kitco"]
-            if kind == "error":
-                raise core.FetchError(gold)      # never calculate without a fresh gold price
-            xe_reading = xe_latest
-            if reads["xe"] is not None:
-                xe_kind, xe_value = reads["xe"]
-                if xe_kind == "ok":
-                    xe_reading = xe_value
-                elif xe_reading is None or not is_fresh("XE", xe_reading):
-                    raise core.FetchError(xe_value)   # XE failed and there is no fresh rate
-            if xe_reading is None:
-                raise core.FetchError(xe_last_error or "XE: no rate yet.")   # XE's own reason
-            raw_rate, xe_time, _ = xe_reading
-            core.check_fresh("XE", xe_time)      # a reused XE rate must still be fresh
-            bid, kitco_time, source = gold
-            us = core.round_us(raw_rate)
-            outcome = ("ok", {
-                "calculated_at": datetime.now(core.MANILA),     # Philippine time, whatever the PC's zone is
-                "raw_rate": raw_rate, "us": us, "xe_time": xe_time,
-                "gold": bid, "kitco_time": kitco_time, "source": source,
-                "result": core.compute_hk(us, bid),
-            })
+            outcome = ("ok", self.compute_from_cards())
         except core.FetchError as error:
             outcome = ("error", str(error))
         except Exception as error:
             outcome = ("error", f"Unexpected problem: {error}")
-        self.send_to_window(self.calc_done, reads, outcome)
+        self.calc_done(outcome)
 
-    def calc_done(self, reads, outcome):          # runs on the window's thread
-        self.calc_running = False
+    def compute_from_cards(self):
+        """Everything about one calculation, or FetchError if the cards can't be trusted:
+        - the newest gold read must have worked (an older gold price is never used);
+        - XE may be up to a minute old (it is read once a minute), but never older than
+          core's limit; if XE's own read failed, its reason is shown."""
+        gold = self.kitco
+        if gold.error:
+            raise core.FetchError(gold.error)
+        if gold.latest is None:
+            raise core.FetchError("Kitco: no gold price yet.")
+        if not self.xe_usable():
+            if self.xe.error or self.xe.latest is None:
+                raise core.FetchError(self.xe.error or "XE: no rate yet.")
+            core.check_fresh("XE", self.xe.latest[1])      # raises "time-stamped N minutes ago"
+        raw_rate, xe_time, _ = self.xe.latest
+        bid, kitco_time, source = gold.latest
+        core.check_fresh("Kitco", kitco_time)
+        us = core.round_us(raw_rate)
+        return {
+            "calculated_at": datetime.now(core.MANILA),     # Philippine time, whatever the PC's zone is
+            "raw_rate": raw_rate, "us": us, "xe_time": xe_time,
+            "gold": bid, "kitco_time": kitco_time, "source": source,
+            "result": core.compute_hk(us, bid),
+        }
+
+    def calc_done(self, outcome):
         self.calc_button.state(["!disabled"])
-        # The next automatic calculation is one interval after this one FINISHED, so
-        # calculations never overlap however short the interval is.
-        self.next_calc_at = time.monotonic() + self.interval_seconds()
-        for feed in self.feeds:                   # show what was read on the XE / Kitco cards
-            read = reads[feed.key]
-            if read is None:
-                continue                          # XE wasn't due: its card keeps its reading
-            kind, value = read
-            if kind == "ok":
-                feed.latest, feed.error = value, ""
-            else:
-                feed.error = value
         manual = self.calc_trigger == "manual"
         kind, value = outcome
         if kind == "ok":
             self.last_failure = ""
             self.last_data = value
             self.show_result()
-            saved = False
-            if manual or time.monotonic() >= self.next_save_at:     # every 15 min + each press
-                self.next_save_at = time.monotonic() + SAVE_EVERY_SECONDS
-                saved = self.save_record(value)
-                line = records.log_ok(value, self.calc_trigger)
-                self.write_log(line if saved else line + "  [not saved to records.csv yet]")
+            saved = self.save_record(value)          # every calculation gets a row
+            line = records.log_ok(value, self.calc_trigger)
+            self.write_log(line if saved else line + "  [not saved to records.csv yet]")
             self.set_status(f"Calculated at {core.clock_12h(value['calculated_at'])}  ·  "
                             f"Gold Bid from the {value['source']}"
                             + ("  ·  Saved to records.csv" if saved else ""), GREEN)
@@ -820,7 +903,8 @@ class App:
                         "mostly repeats the same price.")
             colour = ORANGE
         self.interval_message.config(text=message, foreground=colour)
-        self.start_calculation("auto")   # calculate now, so the change is visible straight away
+        if self.first_reads_done():
+            self.run_calculation("auto")   # calculate now, so the change is visible straight away
 
     def copy_result(self):
         data = self.last_data

@@ -213,12 +213,16 @@ def read_kitco_html():
     return parse_kitco_html(fetch_text(unique_address(KITCO_HTML_URL)))
 
 
-def get_gold_bid():
+def get_gold_bid(try_web_page=True):
     """Gold Bid in USD per troy ounce. Tries the JSON feed first, then the web page.
-    Returns (bid, time of the price, name of the source that worked)."""
+    Returns (bid, time of the price, name of the source that worked).
+    try_web_page=False skips the web-page backup (it is a big page - the window reads gold
+    every second and only allows the backup once a minute)."""
     problems = []
-    for source_name, reader in ((SOURCE_JSON, read_kitco_json),
-                                (SOURCE_HTML, read_kitco_html)):
+    sources = [(SOURCE_JSON, read_kitco_json)]
+    if try_web_page:
+        sources.append((SOURCE_HTML, read_kitco_html))
+    for source_name, reader in sources:
         try:
             bid, kitco_time = reader()
             check_fresh("Kitco", kitco_time)  # an old price counts as a failure too

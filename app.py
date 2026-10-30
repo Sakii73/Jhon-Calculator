@@ -70,6 +70,17 @@ def get_us_rate_limited():
     return reading
 
 
+def xe_tile(raw_rate, xe_time):
+    """What the XE tile shows. xe_ms (the rate's time in milliseconds) lets the page show
+    how old the rate is, ticking every second."""
+    return {
+        "xe_raw": format(raw_rate, "f"),
+        "us": core.plain_2(core.round_us(raw_rate)),
+        "xe_time": core.ph_clock(xe_time),
+        "xe_ms": int(xe_time.timestamp() * 1000),
+    }
+
+
 def build_payload():
     """Do one full calculation. Returns a dict the web page can show directly.
     Raises core.FetchError if a source can't be read or is too old - exactly like
@@ -92,13 +103,12 @@ def build_payload():
         "steps": core.step_lines(result),                   # the computation, one line each
         "sources": core.source_text(raw_rate, us, xe_time, gold, kitco_time, source),
         "hk": result["hk"],
-        "live": {                                           # the always-visible Gold / XE tiles
+        "live": dict(xe_tile(raw_rate, xe_time), **{        # the always-visible Gold / XE tiles
             "gold": f"{gold:,.2f}",
+            "gold_plain": core.plain_2(gold),
             "gold_time": core.ph_clock(kitco_time, seconds=(source == core.SOURCE_JSON)),
-            "xe_raw": format(raw_rate, "f"),
-            "us": core.plain_2(us),
-            "xe_time": core.ph_clock(xe_time),
-        },
+            "gold_ms": int(kitco_time.timestamp() * 1000),
+        }),
         "record": {                                         # one history row (desktop CSV columns)
             "date": now_ph.strftime("%Y-%m-%d"),
             "time": now_ph.strftime("%H:%M:%S"),
@@ -122,6 +132,23 @@ def api_price():
         payload = {"ok": False, "error": f"Unexpected problem: {error}"}
     response = jsonify(payload)
     response.headers["Cache-Control"] = "no-store"   # never show a cached price
+    return response
+
+
+@app.get("/api/xe")
+def api_xe():
+    """Only the XE rate, for the XE tile. The page asks once a minute; XE itself is still
+    read at most once a minute (get_us_rate_limited). Gold is NOT read here - the page
+    reads Kitco directly, every second, without going through this server."""
+    try:
+        raw_rate, xe_time = get_us_rate_limited()
+        payload = dict(xe_tile(raw_rate, xe_time), ok=True)
+    except core.FetchError as error:
+        payload = {"ok": False, "error": str(error)}
+    except Exception as error:
+        payload = {"ok": False, "error": f"Unexpected problem: {error}"}
+    response = jsonify(payload)
+    response.headers["Cache-Control"] = "no-store"
     return response
 
 
