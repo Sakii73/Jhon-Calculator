@@ -52,6 +52,12 @@
   .ghost{background:#fff; color:var(--navy); border:1px solid var(--border); flex:0 0 auto}
   .ghost:hover{background:#f3f6fb}
   .count{color:var(--grey); font-size:13px; margin-top:10px; text-align:center}
+  .setrow{display:flex; gap:8px; align-items:center; margin-top:12px; flex-wrap:wrap; justify-content:center}
+  .setrow label{color:var(--grey); font-size:13px}
+  input[type=number], select{font:inherit; font-size:14px; padding:8px 10px; border:1px solid var(--border);
+      border-radius:8px; background:#fff; color:var(--ink)}
+  input[type=number]{width:72px}
+  #int-hint{text-align:center; margin-top:6px}
 
   details{margin-top:12px; border-top:1px solid var(--border); padding-top:10px}
   summary{cursor:pointer; color:var(--navy); font-size:14px; font-weight:600}
@@ -80,7 +86,7 @@
 <div class="wrap">
   <div class="head">
     <h1>HK Gold Price <span>&#9679;</span></h1>
-    <div class="sub">USD&rarr;PHP from XE &middot; gold Bid from Kitco &middot; recalculates every 15 minutes while open</div>
+    <div class="sub">USD&rarr;PHP from XE &middot; gold Bid from Kitco &middot; re-reads on a timer you set (default: every minute)</div>
   </div>
 
   <div class="bwrap card" style="border-bottom:0; padding-bottom:0">
@@ -98,6 +104,18 @@
       <button id="go" class="go">Calculate now</button>
     </div>
     <div id="count" class="count"></div>
+
+    <div class="setrow">
+      <label for="int-amt">Update every</label>
+      <input id="int-amt" type="number" min="1" step="1" inputmode="numeric">
+      <select id="int-unit">
+        <option value="seconds">seconds</option>
+        <option value="minutes">minutes</option>
+        <option value="hours">hours</option>
+      </select>
+      <button id="int-apply" class="ghost mini">Apply</button>
+    </div>
+    <div id="int-hint" class="empty"></div>
 
     <details>
       <summary>Show the computation</summary>
@@ -122,7 +140,12 @@
 <script>
 "use strict";
 // ---- settings -------------------------------------------------------------
-var AUTO_MS = 15 * 60 * 1000;     // recalculate every 15 minutes while open
+// How often the page re-reads the price. The user can change this with the controls
+// under the button. Default 60s. Note: XE and Kitco only refresh about once a minute,
+// so a shorter interval just re-reads the same number (and risks being blocked).
+var UNITS = { seconds:1, minutes:60, hours:3600 };
+var INT_MIN = 1, INT_MAX = 24 * 3600, FAST = 30, INT_KEY = "hk_interval_v1";
+var AUTO_MS = 60 * 1000;   // real value set at startup from the saved setting
 var KEY = "hk_history_v1";        // where history is kept IN THIS BROWSER
 var CSV_HEAD = ["date","time","Us raw","Us","Gold","Hk","XE time","Kitco time"];
 var XLS_HEAD = ["Date","Time","Us raw","Us","Gold","Hk","XE time","Kitco time"];
@@ -181,8 +204,33 @@ function renderHistory(){
 // ---- countdown ------------------------------------------------------------
 function schedule(){
   if (autoTimer) clearInterval(autoTimer);
-  autoTimer = setInterval(calcNow, AUTO_MS);   // keep the 15-min rhythm
+  autoTimer = setInterval(calcNow, AUTO_MS);   // keep the chosen rhythm
   nextAt = Date.now() + AUTO_MS;
+}
+
+// ---- user-set interval (stored on this device) ----------------------------
+function loadInterval(){
+  try{ var s = JSON.parse(localStorage.getItem(INT_KEY));
+       if (s && UNITS[s.unit] && s.amount > 0) return s; }catch(e){}
+  return { amount:60, unit:"seconds" };
+}
+function saveInterval(s){ try{ localStorage.setItem(INT_KEY, JSON.stringify(s)); }catch(e){} }
+function intervalSeconds(s){ return Math.min(INT_MAX, Math.max(INT_MIN, Math.round(s.amount * UNITS[s.unit]))); }
+function refreshHint(secs){
+  document.getElementById("int-hint").textContent = secs < FAST
+    ? "XE and Kitco only update about once a minute, so under ~30s re-reads the same price (and risks being blocked)."
+    : "";
+}
+function applyInterval(){
+  var amt = parseInt(document.getElementById("int-amt").value, 10);
+  var unit = document.getElementById("int-unit").value;
+  if (!(amt > 0) || !UNITS[unit]){ setBanner("err", "Enter a whole number and pick a unit."); return; }
+  var secs = intervalSeconds({ amount:amt, unit:unit });
+  saveInterval({ amount:amt, unit:unit });
+  AUTO_MS = secs * 1000;
+  refreshHint(secs);
+  setBanner("", "");
+  schedule();            // restart the countdown with the new interval
 }
 setInterval(function(){
   if (!nextAt) return;
@@ -261,11 +309,20 @@ function exportCSV(){
 document.getElementById("go").addEventListener("click", calcNow);
 document.getElementById("xlsx").addEventListener("click", exportXLSX);
 document.getElementById("csv").addEventListener("click", exportCSV);
+document.getElementById("int-apply").addEventListener("click", applyInterval);
 document.getElementById("clear").addEventListener("click", function(){
   if (confirm("Clear the saved history on this device?")){ saveHistory([]); renderHistory(); }
 });
 
 // ---- start ----------------------------------------------------------------
+(function initInterval(){
+  var s = loadInterval();
+  document.getElementById("int-amt").value = s.amount;
+  document.getElementById("int-unit").value = s.unit;
+  var secs = intervalSeconds(s);
+  AUTO_MS = secs * 1000;
+  refreshHint(secs);
+})();
 renderHistory();
 calcNow();
 </script>
