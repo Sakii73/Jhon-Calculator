@@ -86,7 +86,7 @@
 <div class="wrap">
   <div class="head">
     <h1>HK Gold Price <span>&#9679;</span></h1>
-    <div class="sub">Gold Bid from Kitco on a timer you set (Kitco changes every 10 seconds) &middot; USD&rarr;PHP from XE, read at most once a minute</div>
+    <div class="sub">Calculates by itself on a timer you set &middot; gold Bid from Kitco (changes every 10 seconds) &middot; USD&rarr;PHP from XE, read at most once a minute</div>
   </div>
 
   <div class="card">
@@ -104,7 +104,7 @@
     <div id="count" class="count"></div>
 
     <div class="setrow">
-      <label for="int-amt">Update every</label>
+      <label for="int-amt">Calculate every</label>
       <input id="int-amt" type="number" min="1" step="1" inputmode="numeric">
       <select id="int-unit">
         <option value="seconds">seconds</option>
@@ -222,7 +222,7 @@ function saveInterval(s){ try{ localStorage.setItem(INT_KEY, JSON.stringify(s));
 function intervalSeconds(s){ return Math.min(INT_MAX, Math.max(INT_MIN, Math.round(s.amount * UNITS[s.unit]))); }
 function refreshHint(secs){
   document.getElementById("int-hint").textContent = secs < FAST
-    ? "Kitco's gold price changes every 10 seconds, so reading faster mostly repeats the same price (and uses up the free hosting faster)."
+    ? "Kitco's gold price changes every 10 seconds, so calculating faster mostly repeats the same price (and uses up the free hosting faster)."
     : "";
 }
 function applyInterval(){
@@ -241,7 +241,7 @@ setInterval(function(){
   var left = Math.max(0, Math.round((nextAt - Date.now()) / 1000));
   var m = Math.floor(left / 60), s = left % 60;
   document.getElementById("count").textContent =
-    "Next automatic update in " + m + ":" + (s < 10 ? "0" : "") + s;
+    "Next automatic calculation in " + m + ":" + (s < 10 ? "0" : "") + s;
 }, 1000);
 
 // ---- the one network call -------------------------------------------------
